@@ -1,0 +1,88 @@
+# ==========================================
+# 1. Inventory Service (Internal Backend)
+# ==========================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inventory-service
+  labels:
+    app: inventory
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: inventory
+  template:
+    metadata:
+      labels:
+        app: inventory
+    spec:
+      serviceAccountName: default
+      containers:
+      - name: inventory-service
+        image: europe-west2-docker.pkg.dev/devops-cloud-portfolio-p1-2026/portfolio-repo/inventory-service:<IMAGE_TAG>
+        ports:
+        - containerPort: 8001
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8001
+          initialDelaySeconds: 5
+          periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: inventory-service
+spec:
+  type: ClusterIP # Internal only
+  selector:
+    app: inventory
+  ports:
+  - port: 8001
+    targetPort: 8001
+
+# ==========================================
+# 2. Order Service (Public API Gateway)
+# ==========================================
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: order-service
+  labels:
+    app: order
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: order
+  template:
+    metadata:
+      labels:
+        app: order
+    spec:
+      serviceAccountName: default
+      containers:
+      - name: order-service
+        image: europe-west2-docker.pkg.dev/devops-cloud-portfolio-p1-2026/portfolio-repo/order-service:<IMAGE_TAG>
+        ports:
+        - containerPort: 8000
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8000
+          initialDelaySeconds: 5
+          periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: order-service-lb
+spec:
+  type: LoadBalancer # Exposes an external IP
+  selector:
+    app: order
+  ports:
+  - port: 80
+    targetPort: 8000
