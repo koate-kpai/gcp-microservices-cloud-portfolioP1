@@ -77,6 +77,29 @@ jobs:
         # Apply the manifests
         kubectl apply -f k8s/workloads.yaml
         
-        # Verify deployment status
-        kubectl rollout status deployment/order-service --timeout=120s
-        kubectl rollout status deployment/inventory-service --timeout=120s
+        # Verify deployment status with debug output on failure
+        kubectl rollout status deployment/order-service --timeout=120s || {
+          echo "=== FAILED: order-service rollout ==="
+          echo "=== PODS ==="
+          kubectl get pods -l app=order
+          POD=$(kubectl get pods -l app=order -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+          if [ -n "$POD" ]; then
+            echo "=== LOGS ==="
+            kubectl logs "$POD" --tail=80 2>/dev/null || echo "no logs"
+            echo "=== EVENTS ==="
+            kubectl describe pod "$POD" 2>/dev/null | grep -A 20 Events || echo "no events"
+          fi
+          exit 1
+        }
+        
+        kubectl rollout status deployment/inventory-service --timeout=120s || {
+          echo "=== FAILED: inventory-service rollout ==="
+          echo "=== PODS ==="
+          kubectl get pods -l app=inventory
+          POD=$(kubectl get pods -l app=inventory -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+          if [ -n "$POD" ]; then
+            echo "=== LOGS ==="
+            kubectl logs "$POD" --tail=80 2>/dev/null || echo "no logs"
+          fi
+          exit 1
+        }
