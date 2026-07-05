@@ -1,0 +1,50 @@
+# HorizontalPodAutoscalers for both services.
+#
+# Target 70% CPU utilisation to leave headroom for traffic spikes.
+# Min 2 replicas (for HA across spot node preemption), max 10.
+#
+# Why CPU-based HPA:
+#   - Works out of the box on GKE (requires no custom metrics adapter)
+#   - CPU is a reasonable proxy for throughput in Python web services
+#
+# If custom metrics (e.g., queue depth, request latency) become important
+# later, install the Prometheus Adapter and switch to custom/external metrics.
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: order-service-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: order-service
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: inventory-service-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: inventory-service
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70

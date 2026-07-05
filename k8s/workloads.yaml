@@ -16,19 +16,26 @@ spec:
     metadata:
       labels:
         app: inventory
-    spec:
-      serviceAccountName: default
-      containers:
-      - name: inventory-service
-        image: europe-west2-docker.pkg.dev/devops-cloud-portfolio-p1-2026/portfolio-repo/inventory-service:<IMAGE_TAG>
-        ports:
-        - containerPort: 8001
-        readinessProbe:
-          httpGet:
-            path: /healthz
-            port: 8001
-          initialDelaySeconds: 5
-          periodSeconds: 10
+spec:
+  serviceAccountName: default
+  containers:
+  - name: inventory-service
+    image: europe-west2-docker.pkg.dev/devops-cloud-portfolio-p1-2026/portfolio-repo/inventory-service:<IMAGE_TAG>
+    ports:
+    - containerPort: 8001
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 256Mi
+    readinessProbe:
+      httpGet:
+        path: /healthz
+        port: 8001
+      initialDelaySeconds: 5
+      periodSeconds: 10
 ---
 apiVersion: v1
 kind: Service
@@ -61,19 +68,33 @@ spec:
     metadata:
       labels:
         app: order
-    spec:
-      serviceAccountName: default
-      containers:
-      - name: order-service
-        image: europe-west2-docker.pkg.dev/devops-cloud-portfolio-p1-2026/portfolio-repo/order-service:<IMAGE_TAG>
-        ports:
-        - containerPort: 8000
-        readinessProbe:
-          httpGet:
-            path: /healthz
-            port: 8000
-          initialDelaySeconds: 5
-          periodSeconds: 10
+spec:
+  serviceAccountName: order-service
+  containers:
+  - name: order-service
+    image: europe-west2-docker.pkg.dev/devops-cloud-portfolio-p1-2026/portfolio-repo/order-service:<IMAGE_TAG>
+    ports:
+    - containerPort: 8000
+    env:
+    - name: ORDER_SERVICE_API_KEY
+      valueFrom:
+        secretKeyRef:
+          name: order-service-api-key
+          key: api-key
+          optional: true
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 256Mi
+    readinessProbe:
+      httpGet:
+        path: /healthz
+        port: 8000
+      initialDelaySeconds: 5
+      periodSeconds: 10
 ---
 apiVersion: v1
 kind: Service
