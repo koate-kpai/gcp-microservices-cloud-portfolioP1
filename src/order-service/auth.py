@@ -19,6 +19,10 @@ from starlette.middleware.base import BaseHTTPMiddleware
 class APIKeyMiddleware(BaseHTTPMiddleware):
     """Validates the X-API-Key header against the configured key.
 
+    If no API key is configured (empty string), authentication is skipped
+    entirely. This allows the service to run without a key in development
+    or when the key hasn't been provisioned yet.
+
     Excludes health, ready, and metrics endpoints from authentication
     so that Kubernetes probes and Prometheus scraping work without a key.
     """
@@ -30,6 +34,10 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         # Allow unauthenticated access to operational endpoints.
         if request.url.path in ("/healthz", "/ready", "/metrics"):
+            return await call_next(request)
+
+        # If no key is configured, skip auth (safe default for dev).
+        if not self.api_key:
             return await call_next(request)
 
         # Extract and validate the API key.

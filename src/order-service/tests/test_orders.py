@@ -1,5 +1,6 @@
 """Tests for the order-service API endpoints."""
 
+import pytest
 from fastapi.testclient import TestClient
 
 from main import app, orders
@@ -7,9 +8,11 @@ from main import app, orders
 client = TestClient(app)
 
 
-def setup_method():
-    """Clear the order repo before each test for isolation."""
+@pytest.fixture(autouse=True)
+def clear_orders():
+    """Clear the order repo before each test for full isolation."""
     orders._orders.clear()
+    yield
 
 
 def test_healthz():
@@ -25,7 +28,7 @@ def test_readiness():
 
 
 class TestCreateOrder:
-    def test_create_order_success(self):
+    def test_create_order_success(self, inventory_mock):
         payload = {
             "customer_email": "test@example.com",
             "items": [
@@ -37,7 +40,7 @@ class TestCreateOrder:
         assert response.status_code == 202
         data = response.json()
         assert data["status"] == "accepted_and_reserved"
-        assert data["total_amount"] == 79.97  # 19.99 + 2 * 29.99
+        assert data["total_amount"] == 79.97
 
     def test_create_order_invalid_email(self):
         payload = {
@@ -49,7 +52,7 @@ class TestCreateOrder:
 
 
 class TestGetOrder:
-    def test_get_existing_order(self):
+    def test_get_existing_order(self, inventory_mock):
         create_resp = client.post(
             "/orders",
             json={
@@ -75,7 +78,7 @@ class TestListOrders:
         assert response.status_code == 200
         assert response.json() == []
 
-    def test_list_orders_returns_created_orders(self):
+    def test_list_orders_returns_created_orders(self, inventory_mock):
         client.post(
             "/orders",
             json={
