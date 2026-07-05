@@ -1,0 +1,83 @@
+# Kubernetes NetworkPolicy for zero-trust within the cluster.
+#
+# Rationale:
+#   Even in a private VPC, pod-to-pod traffic is unrestricted by default.
+#   A NetworkPolicy implements least-privilege networking:
+#   - Only the LoadBalancer can reach order-service
+#   - Only order-service can reach inventory-service
+#   - kube-system can reach both for health checks (kubelet)
+#
+# GKE requires a network policy enforcement engine. This works out of the
+# box with Dataplane V2 (enabled via the GKE cluster's --enable-dataplane-v2
+# flag) or by installing Calico.
+
+---
+# 1. Default-deny ingress for all pods (namespace-wide).
+# Any pod not explicitly allowed by a subsequent policy will be blocked.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+---
+# 2. Allow kubelet health checks from kube-system to all pods.
+# Required for liveness/readiness probes and node-level health monitoring.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-health-checks
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - port: 8000
+          protocol: TCP
+        - port: 8001
+          protocol: TCP
+---
+# 3. Allow external traffic to order-service from the LoadBalancer.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-order-service-external
+spec:
+  podSelector:
+    matchLabels:
+      app: order
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - port: 8000
+          protocol: TCP
+      from:
+        - namespaceSelector: {}
+---
+# 4. Allow order-service to call inventory-service.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-inventory-from-order
+spec:
+  podSelector:
+    matchLabels:
+      app: inventory
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: order
+      ports:
+        - port: 8001
+          protocol: TCP

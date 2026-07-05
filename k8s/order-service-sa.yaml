@@ -1,0 +1,21 @@
+# Dedicated Kubernetes ServiceAccount for the order-service.
+#
+# Using the default service account is a security anti-pattern because:
+#   1. If a pod is compromised, the attacker inherits the default SA's
+#      GCP IAM bindings (potentially broad).
+#   2. Auditing which service uses which permissions becomes impossible.
+#
+# Each microservice gets its own KSA, which is then bound to a minimal
+# GCP service account via Workload Identity (see terraform/iam.tf).
+#
+# The inventory-service SA follows the same pattern (added when needed).
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: order-service
+  annotations:
+    # This annotation will be set by Terraform after Workload Identity
+    # binding is configured. Uncomment once the GCP SA is created:
+    # iam.gke.io/gcp-service-account: order-service-sa@PROJECT_ID.iam.gserviceaccount.com
+    description: "Dedicated service account for the order-service pods"
