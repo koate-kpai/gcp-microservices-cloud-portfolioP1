@@ -32,6 +32,15 @@ docker compose up --build
 - Inventory service: http://localhost:8001
 - API docs: http://localhost:8000/docs
 
+### Pre-commit hooks
+
+```bash
+pip install pre-commit
+pre-commit install
+```
+
+Hooks run automatically on `git commit`. To run manually: `pre-commit run --all-files`.
+
 ### Running tests
 
 ```bash
@@ -50,6 +59,30 @@ pytest src/order-service/tests
 # Run integration tests only
 pytest src/order-service/tests/integration
 ```
+
+## API Endpoints
+
+### Order Service (port 8000)
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| GET | `/healthz` | No | Liveness probe |
+| GET | `/ready` | No | Readiness probe |
+| GET | `/metrics` | No | Prometheus metrics |
+| GET | `/orders` | Yes | List all orders |
+| GET | `/orders/{id}` | Yes | Get order by ID |
+| POST | `/orders` | Yes | Create new order |
+
+### Inventory Service (port 8001)
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| GET | `/healthz` | No | Liveness probe |
+| GET | `/ready` | No | Readiness probe |
+| GET | `/metrics` | No | Prometheus metrics |
+| GET | `/items` | No | List catalog items |
+| GET | `/items/{id}` | No | Get item by ID |
+| POST | `/inventory/reserve` | No | Reserve stock |
 
 ## Project Structure
 
@@ -78,6 +111,7 @@ pytest src/order-service/tests/integration
 │   ├── iam.tf              # Workload Identity bindings
 │   └── variables.tf        # Input variables
 ├── docker-compose.yml
+├── document.txt          # Full implementation plan & architectural decisions
 ├── pyproject.toml
 └── .pre-commit-config.yaml
 ```
@@ -92,7 +126,19 @@ The CI/CD pipeline (`.github/workflows/deploy.yml`) handles deployment automatic
 4. Applies manifests with `kubectl apply`
 5. Verifies rollout with debug output on failure
 
+### API key setup
+
+The order-service enforces `X-API-Key` header authentication. For local dev, leave `ORDER_SERVICE_API_KEY` unset to disable auth. In production, set via a Kubernetes Secret:
+
+```bash
+kubectl create secret generic order-service-api-key --from-literal=api-key=<your-key>
+```
+
 ### Infrastructure provisioning
+
+> **Note:** The Terraform state backend is configured for GCS but commented out
+> in `terraform/backend.tf`. After the initial `terraform apply` creates the
+> state bucket, uncomment the block and run `terraform init -migrate-state`.
 
 ```bash
 cd terraform
