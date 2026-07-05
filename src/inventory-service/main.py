@@ -1,12 +1,11 @@
-# inventory-service/main.py
-
 import time
 import json
 import logging
 import sys
-from fastapi import FastAPI, status, Request
+from fastapi import FastAPI, HTTPException, status, Request
 from config import settings
-from schemas import InventoryReservationRequest, ReservationResponse
+from schemas import InventoryReservationRequest, ReservationResponse, Item
+from inventory_repo import InventoryRepo
 
 logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 logger = logging.getLogger("inventory-service")
@@ -26,6 +25,10 @@ def log_json(severity: str, message: str, extra: dict = None):
 
 
 app = FastAPI(title=settings.PROJECT_NAME)
+
+# Repository instance — scoped to the application lifetime.
+# Swap this for a database-backed implementation without changing routes.
+inventory = InventoryRepo()
 
 
 @app.middleware("http")
@@ -56,6 +59,19 @@ async def readiness():
     return {"status": "ready"}
 
 
+@app.get("/items", response_model=list[Item], status_code=status.HTTP_200_OK)
+async def list_items():
+    return inventory.list_items()
+
+
+@app.get("/items/{item_id}", response_model=Item, status_code=status.HTTP_200_OK)
+async def get_item(item_id: str):
+    item = inventory.get_item(item_id)
+    if item is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Item not found")
+    return item
+
+
 @app.post(
     "/inventory/reserve",
     response_model=ReservationResponse,
@@ -68,8 +84,21 @@ async def reserve_inventory(payload: InventoryReservationRequest):
         {"order_id": payload.order_id},
     )
 
-    # Simulate database inventory check logic
-    # Real implementations would fetch data here; we assume success for mock production flow
+    # Delegate to the repository which performs the actual stock check.
+    items_for_repo = [r.model_dump() for r in payload.items]
+    success = inventory.reserve(payload.order_id, items_for_repo)
+
+    if not success:
+        log_json(
+            "WARNING",
+            f"Insufficient stock for order {payload.order_id}",
+            {"order_id": payload.order_id},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Insufficient stock for one or more items",
+        )
+
     log_json(
         "INFO",
         f"Inventory locked successfully for order {payload.order_id}",
