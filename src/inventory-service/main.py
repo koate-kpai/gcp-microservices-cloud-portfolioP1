@@ -6,6 +6,13 @@ from fastapi import FastAPI, HTTPException, status, Request
 from config import settings
 from schemas import InventoryReservationRequest, ReservationResponse, Item
 from inventory_repo import InventoryRepo
+from metrics import (
+    metrics_endpoint,
+    http_request_count,
+    http_request_latency,
+    reservations_total,
+    inventory_items_total,
+)
 
 logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 logger = logging.getLogger("inventory-service")
@@ -36,6 +43,18 @@ async def log_requests(request: Request, call_next):
     start_time = time.time()
     response = await call_next(request)
     duration = time.time() - start_time
+
+    # Update Prometheus metrics
+    http_request_count.labels(
+        method=request.method,
+        endpoint=request.url.path,
+        status=response.status_code,
+    ).inc()
+    http_request_latency.labels(
+        method=request.method,
+        endpoint=request.url.path,
+    ).observe(duration)
+
     log_json(
         "INFO",
         "HTTP Request Processed",
@@ -57,6 +76,11 @@ async def liveness():
 @app.get("/ready", status_code=status.HTTP_200_OK)
 async def readiness():
     return {"status": "ready"}
+
+
+@app.get("/metrics", status_code=status.HTTP_200_OK)
+async def metrics():
+    return await metrics_endpoint()
 
 
 @app.get("/items", response_model=list[Item], status_code=status.HTTP_200_OK)
@@ -84,7 +108,6 @@ async def reserve_inventory(payload: InventoryReservationRequest):
         {"order_id": payload.order_id},
     )
 
-    # Delegate to the repository which performs the actual stock check.
     items_for_repo = [r.model_dump() for r in payload.items]
     success = inventory.reserve(payload.order_id, items_for_repo)
 
@@ -94,10 +117,13 @@ async def reserve_inventory(payload: InventoryReservationRequest):
             f"Insufficient stock for order {payload.order_id}",
             {"order_id": payload.order_id},
         )
+        reservations_total.labels(status="failed").inc()
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Insufficient stock for one or more items",
         )
+
+    reservations_total.labels(status="success").inc()
 
     log_json(
         "INFO",

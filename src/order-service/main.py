@@ -11,6 +11,12 @@ import httpx
 from config import settings
 from schemas import OrderCreate, OrderResponse
 from order_repo import OrderRepo
+from metrics import (
+    metrics_endpoint,
+    http_request_count,
+    http_request_latency,
+    orders_created_total,
+)
 
 logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 logger = logging.getLogger("order-service")
@@ -48,6 +54,17 @@ async def log_requests(request: Request, call_next):
     start_time = time.time()
     response = await call_next(request)
     duration = time.time() - start_time
+
+    http_request_count.labels(
+        method=request.method,
+        endpoint=request.url.path,
+        status=response.status_code,
+    ).inc()
+    http_request_latency.labels(
+        method=request.method,
+        endpoint=request.url.path,
+    ).observe(duration)
+
     log_json(
         "INFO",
         "HTTP Request Processed",
@@ -69,6 +86,11 @@ async def liveness():
 @app.get("/ready", status_code=status.HTTP_200_OK)
 async def readiness():
     return {"status": "ready"}
+
+
+@app.get("/metrics", status_code=status.HTTP_200_OK)
+async def metrics():
+    return await metrics_endpoint()
 
 
 @app.get("/orders", response_model=List[OrderResponse], status_code=status.HTTP_200_OK)
@@ -125,5 +147,7 @@ async def create_order(order: OrderCreate):
 
     # Persist the order after successful inventory reservation.
     entry = orders.create(order_id=order_id, total_amount=total_amount)
+
+    orders_created_total.labels(status="success").inc()
 
     return entry
