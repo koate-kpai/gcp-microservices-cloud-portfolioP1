@@ -11,6 +11,7 @@ import httpx
 from config import settings
 from schemas import OrderCreate, OrderResponse
 from order_repo import OrderRepo
+from auth import APIKeyMiddleware
 from metrics import (
     metrics_endpoint,
     http_request_count,
@@ -42,6 +43,11 @@ orders = OrderRepo()
 
 # Global HTTPX async client for connection pooling
 async_client = httpx.AsyncClient(timeout=5.0)
+
+# Register API key authentication middleware.
+# The key is loaded from the ORDER_SERVICE_API_KEY environment variable.
+# If empty, authentication is effectively disabled (safe for dev).
+app.add_middleware(APIKeyMiddleware, api_key=settings.ORDER_SERVICE_API_KEY)
 
 
 @app.on_event("shutdown")

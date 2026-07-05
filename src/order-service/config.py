@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     INVENTORY_SERVICE_URL: str = (
         "http://inventory-service.default.svc.cluster.local:8001"
     )
+    ORDER_SERVICE_API_KEY: str = ""
 
     model_config = SettingsConfigDict(env_file=".env", case_sensitive=True)
 
