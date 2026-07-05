@@ -1,0 +1,552 @@
+================================================================================
+  GCP Microservices Cloud Portfolio — Implementation Plan
+================================================================================
+  Project  : devops-cloud-portfolio-p1-2026
+  Region   : europe-west2 (London)
+  Repo     : gcp-microservices-cloud-portfolio-P1
+================================================================================
+
+TABLE OF CONTENTS
+  1.  Overview
+  2.  Architecture Diagram
+  3.  Technology Decisions & Rationale
+  4.  Implementation Phases
+      4.1  Phase 1 — Real Persistence (In-Memory)
+      4.2  Phase 2 — Local Dev with Docker Compose
+      4.3  Phase 3 — Testing Suite
+      4.4  Phase 4 — CI/CD: Pre-commits & PR Checks
+      4.5  Phase 5 — Observability: /metrics Endpoint
+      4.6  Phase 6 — Security: NetworkPolicy & API Key Auth
+      4.7  Phase 7 — K8s Hardening: Resource Limits & HPA
+      4.8  Phase 8 — Infrastructure: GCS Backend & Workload Identity
+      4.9  Phase 9 — Cost Management: Destroy Scripts
+      4.10 Phase 10 — Documentation: README
+  5.  Commit Strategy Reference
+  6.  Appendix: GCP Free Tier Constraints
+
+================================================================================
+1.  OVERVIEW
+================================================================================
+
+This document details the incremental improvement plan for the portfolio
+microservices project. Each phase builds on the previous, can be reviewed and
+tested independently, and results in a single clean commit.
+
+The goal is production-readiness within GCP Free Tier limits, keeping monthly
+costs as low as possible while maintaining real-world DevOps practices.
+
+================================================================================
+2.  ARCHITECTURE DIAGRAM
+================================================================================
+
+  ┌─────────────────────────────────────────────────────────────────────┐
+  │                        Internet / Client                            │
+  └──────────────────────────┬──────────────────────────────────────────┘
+                             │
+                     ┌───────▼────────┐
+                     │   LoadBalancer  │  order-service-lb (port 80)
+                     │   (External)    │
+                     └───────┬────────┘
+                             │
+                     ┌───────▼────────┐     ┌──────────────────────────┐
+                     │  Order Service  │────▶│   Inventory Service      │
+                     │  (FastAPI:8000) │     │   (FastAPI:8001)         │
+                     │                 │     │                          │
+                     │  POST /orders   │     │  POST /inventory/reserve │
+                     │  GET /orders/{id}│     │  GET /items              │
+                     │  GET /orders    │     │  GET /items/{id}         │
+                     └───────┬────────┘     └──────────────────────────┘
+                             │
+                     ┌───────▼────────┐
+                     │   In-Memory     │
+                     │   Data Store    │  (per-service, ephemeral)
+                     └────────────────┘
+
+  GCP Resources (Terraform):
+  ┌──────────────────────────────────────────────────────────────────────┐
+  │  VPC (portfolio-vpc) ── Subnet (10.0.0.0/19) ── Cloud NAT           │
+  │       │                                                              │
+  │  Private GKE Cluster (portfolio-gke-cluster)                         │
+  │       │                                                              │
+  │  Spot Node Pool (2× e2-medium)                                       │
+  │       │                                                              │
+  │  Artifact Registry (portfolio-repo) ── Docker images                 │
+  └──────────────────────────────────────────────────────────────────────┘
+
+================================================================================
+3.  TECHNOLOGY DECISIONS & RATIONALE
+================================================================================
+
+3.1 In-Memory Persistence (Phase 1)
+  ── Decision: Store orders and inventory in Python dicts per service.
+  ── Why:    Eliminates the current mock that always returns success. Gives
+             real, testable behavior without provisioning a database.
+  ── Trade-off: Data is lost on pod restart. Acceptable at this stage
+                because the next step (Firestore) would use the same
+                repository pattern — only the backend impl changes.
+
+3.2 No Database Provisioning Yet
+  ── Decision: Do NOT create a GCP database (Firestore, Cloud SQL) now.
+  ── Why:    Free Tier Firestore exists but adds complexity (service
+             accounts, IAM, Terraform resources). The in-memory layer
+             proves the API contract first. Firestore can be swapped in
+             as a future enhancement without changing any route handlers
+             (just the data-access layer).
+  ── Opinion: Premature database selection is a common failure mode. Let
+              the API surface stabilise before committing to a schema.
+
+3.3 API Key Auth over IAP / OAuth2
+  ── Decision: Validate a static API key via middleware; load from env var.
+  ── Why:    IAP costs $0.05/user/session ≈ $4-5/mo even for one user.
+             OAuth2-proxy requires additional infrastructure. A simple API
+             key in a header is free, easy to rotate via Secret Manager,
+             and sufficient for a portfolio/Demo project.
+  ── Security note: The key is static and sent in plaintext — pair this
+                    with HTTPS (already handled by the LoadBalancer).
+
+3.4 Prometheus /metrics over GCP Managed Prometheus
+  ── Decision: Use the `prometheus_client` Python library with a
+               FastAPI middleware. Export a `/metrics` endpoint.
+  ── Why:    GCP Managed Prometheus charges per sample ingested.
+             At portfolio scale, a single /metrics endpoint scraped
+             by kube-prometheus-stack or GKE Managed Prometheus costs
+             pennies. The Python library is zero-infrastructure.
+  ── Trade-off: No long-term retention. Acceptable for a demo.
+
+3.5 GCS Backend for Terraform State
+  ── Decision: Migrate local `terraform.tfstate` to a GCS bucket.
+  ── Why:    A local state file is lost on machine wipe, prevents team
+             collaboration, and is a single point of failure. GCS with
+             object versioning provides history and rollback.
+  ── Cost:   Negligible (~$0.026/GB/month for Standard storage).
+
+3.6 NetworkPolicy in a Private Cluster
+  ── Decision: Add a Kubernetes NetworkPolicy restricting ingress to
+               the order-service to only the LoadBalancer, and the
+               inventory-service to only the order-service.
+  ── Why:    Even inside a private VPC, pod-to-pod traffic is untrusted
+             by default. A NetworkPolicy implements zero-trust within the
+             cluster and kills lateral movement if a pod is compromised.
+  ── Note:   GKE requires a network policy enforcement engine (Calico or
+             Dataplane V2). The plan enables Dataplane V2 in the GKE
+             cluster (already configurable via Terraform).
+
+3.7 Spot (Preemptible) Nodes
+  ── Decision: Already in use — keep them.
+  ── Why:    60-90% discount vs regular nodes. Acceptable for stateless
+             services with multiple replicas (2× each). If a node is
+             preempted, Kubernetes reschedules the pods.
+
+================================================================================
+4.  IMPLEMENTATION PHASES
+================================================================================
+
+4.1 PHASE 1 — Real Persistence (In-Memory)
+────────────────────────────────────────────────────────────────────────
+  Goal:    Replace mock inventory logic with real in-memory state.
+           Add order storage endpoints (GET /orders, GET /orders/{id}).
+  Pattern: Repository pattern — all data access goes through a
+           class/object, not inline in route handlers. This makes the
+           eventual swap to Firestore a single-file change.
+
+  Files changed:
+    src/inventory-service/inventory_repo.py        (NEW)
+    ├── InventoryRepo class with dict of items
+    ├── seed_data() — populates sample items on startup
+    ├── reserve(order_id, items) → bool
+    └── release(order_id) — future-proofing
+
+    src/inventory-service/main.py                  (MODIFY)
+    ├── Import InventoryRepo, instantiate at module level
+    ├── POST /inventory/reserve — now actually checks stock
+    └── GET  /items       — list all catalog items
+    └── GET  /items/{id}  — single item detail
+
+    src/inventory-service/schemas.py               (MODIFY)
+    ├── Add Item model (item_id, name, quantity, price)
+
+    src/order-service/order_repo.py                 (NEW)
+    ├── OrderRepo class with dict of orders
+    ├── create(order_data) → OrderResponse
+    └── get(order_id) → OrderResponse | None
+    └── list() → list[OrderResponse]
+
+    src/order-service/main.py                       (MODIFY)
+    ├── Import OrderRepo, instantiate at module level
+    ├── POST /orders — now also stores the order
+    ├── GET  /orders/{id} — retrieve a single order
+    └── GET  /orders — list all orders (pagination-ready)
+
+  Commit message:
+    feat: add in-memory persistence with repository pattern
+
+    Replace mock inventory logic with real in-memory state using the
+    repository pattern. Inventory now actually tracks stock levels and
+    validates reservations. Orders are persisted in memory and retrievable
+    via GET endpoints.
+
+    Key changes:
+    - inventory-service: InventoryRepo, seed data, stock validation
+    - order-service: OrderRepo, order CRUD, GET endpoints for retrieval
+    - Both services: repository pattern isolates data access for future
+      database swap without changing route handlers
+
+================================================================================
+
+4.2 PHASE 2 — Local Dev with Docker Compose
+────────────────────────────────────────────────────────────────────────
+  Goal:    Enable one-command local development that mirrors the GKE deployment.
+
+  Opinionated decision:
+    ── Use a single docker-compose.yml at the project root.
+    ── Map host ports 8000 (order) and 8001 (inventory).
+    ── Run `uvicorn --reload` via override so code changes are picked up.
+    ── Set INVENTORY_SERVICE_URL to http://inventory-service:8001.
+    ── No database container needed (in-memory).
+
+  Files changed:
+    docker-compose.yml                             (NEW)
+    ├── service: inventory-service (build: src/inventory-service)
+    ├── service: order-service    (build: src/order-service)
+    ├── order-service depends_on: inventory-service
+    └── INVENTORY_SERVICE_URL env override
+
+  Usage:
+    docker compose up --build
+    # or with hot reload: docker compose -f docker-compose.yml -f docker-compose.override.yml up
+
+  Commit message:
+    feat: add docker-compose.yml for one-command local development
+
+    Single docker-compose file at the project root that starts both
+    services. Order-service is configured to reach inventory-service
+    via the internal Docker Compose DNS name, mirroring the K8s
+    ClusterIP pattern.
+
+================================================================================
+
+4.3 PHASE 3 — Testing Suite
+────────────────────────────────────────────────────────────────────────
+  Goal:    Unit + integration tests covering all endpoints. Run via pytest.
+
+  Opinionated decisions:
+    ── Use FastAPI's TestClient (wraps httpx) for HTTP-level tests.
+    ── Use pytest fixtures to set up fresh repo instances per test.
+    ─── Tests live in service/tests/test_*.py (colocated, not a top-level folder).
+    ── Config in pyproject.toml (modern Python standard).
+
+  Files changed:
+    pyproject.toml                                 (NEW)
+    ├── [tool.pytest.ini_options] with test paths
+    ├── Optional: [tool.ruff] lint configuration
+
+    src/inventory-service/tests/__init__.py        (NEW)
+    src/inventory-service/tests/test_inventory.py  (NEW)
+    ├── test_reserve_success
+    ├── test_reserve_insufficient_stock
+    ├── test_reserve_item_not_found
+    ├── test_healthz
+    └── test_list_items
+
+    src/order-service/tests/__init__.py            (NEW)
+    src/order-service/tests/test_orders.py         (NEW)
+    ├── test_create_order_success
+    ├── test_create_order_inventory_down
+    ├── test_get_order_by_id
+    ├── test_list_orders
+    ├── test_healthz
+    └── test_readiness
+
+    src/order-service/tests/integration/            (NEW)
+    ├── __init__.py
+    └── test_order_flow.py
+    └── Starts both services via TestClient + httpx ASGI transport
+
+  Commit messages:
+    1. feat: add pytest configuration and inventory-service tests
+    2. feat: add order-service unit and integration tests
+
+================================================================================
+
+4.4 PHASE 4 — CI/CD: Pre-commits & PR Checks
+────────────────────────────────────────────────────────────────────────
+  Goal:    Ensure code quality before commits and on every PR.
+
+  Opinionated decisions:
+    ── Use pre-commit framework with hooks for ruff (format+lint), trailing-whitespace, end-of-file-fixer.
+    ── GitHub Actions workflow runs on PRs to main: lint → test → build (no deploy).
+    ── The existing deploy.yml stays unchanged; deploy only on push to main.
+
+  Files changed:
+    .pre-commit-config.yaml                         (NEW)
+    ├── repo: astral-sh/ruff-pre-commit  (ruff, ruff-format)
+    └── repo: pre-commit/pre-commit-hooks (trailing-whitespace, end-of-file-fixer, check-yaml)
+
+    .github/workflows/pr-checks.yml                 (NEW)
+    ├── on: pull_request (branches: [main])
+    ├── Run: pip install -r service requirements + pytest + ruff check
+    └── Does NOT build Docker images (saves ~2 min per PR)
+
+  Commit messages:
+    1. ci: add pre-commit hooks with ruff linting and formatting
+    2. ci: add PR checks workflow for lint, test, and build verification
+
+================================================================================
+
+4.5 PHASE 5 — Observability: /metrics Endpoint
+────────────────────────────────────────────────────────────────────────
+  Goal:    Expose Prometheus metrics on both services for cluster monitoring.
+
+  Opinionated decision:
+    ── Use prometheus_client library (not OpenTelemetry) to keep dependencies minimal.
+    ── Expose /metrics at the application level (not a sidecar).
+    ── Track: HTTP request count, latency histogram, active orders, inventory levels.
+    ── OpenTelemetry can be layered on top later if needed.
+
+  Files changed:
+    src/inventory-service/requirements.txt          (MODIFY)
+    ├── + prometheus-client==0.20.0
+
+    src/inventory-service/metrics.py                (NEW)
+    ├── request_count, request_latency histograms
+    └── inventory_items_total, reservations_total
+
+    src/inventory-service/main.py                   (MODIFY)
+    ├── Add /metrics endpoint
+    └── Instrument request handler with middleware
+
+    src/order-service/requirements.txt              (MODIFY)
+    ├── + prometheus-client==0.20.0
+
+    src/order-service/metrics.py                    (NEW)
+    ├── request_count, request_latency histograms
+    └── orders_created_total
+
+    src/order-service/main.py                       (MODIFY)
+    ├── Add /metrics endpoint
+    └── Instrument request handler with middleware
+
+  Commit message:
+    feat: add prometheus /metrics endpoints to both services
+
+    Expose Prometheus-compatible metrics (request count, latency, business
+    metrics) via /metrics endpoints. This enables GKE Managed Prometheus,
+    kube-prometheus-stack, or any Prometheus server to scrape both services
+    for observability without additional sidecars.
+
+================================================================================
+
+4.6 PHASE 6 — Security: NetworkPolicy & API Key Auth
+────────────────────────────────────────────────────────────────────────
+  Goal:    Authenticate external requests and restrict pod-to-pod traffic.
+
+  Opinionated decisions:
+    ── API key is validated against the value in the ORDER_SERVICE_API_KEY env var.
+    ── The key is passed as the X-API-Key header. Missing/invalid keys return 401.
+    ── Health/readiness probes are excluded from auth (required by K8s).
+    ── NetworkPolicy uses Kubernetes default-deny ingress, then allows only
+        necessary flows.
+    ── API key applies to order-service only (inventory is internal-only).
+
+  Files changed:
+    src/order-service/auth.py                        (NEW)
+    ├── api_key_middleware factory function
+    └── Excludes /healthz, /ready, /metrics from auth
+
+    src/order-service/config.py                      (MODIFY)
+    ├── + ORDER_SERVICE_API_KEY: str = ""
+
+    src/order-service/main.py                       (MODIFY)
+    ├── Register api_key_middleware
+
+    k8s/network-policy.yaml                         (NEW)
+    ├── Default deny ingress (namespace-wide)
+    ├── Allow order-service: health checks from kube-system
+    ├── Allow order-service-lb: external traffic
+    └── Allow inventory-service: health checks + order-service only
+
+    k8s/order-service-sa.yaml                       (NEW)
+    ├── Dedicated Kubernetes ServiceAccount for order-service
+    └── No cloud IAM binding yet (Phase 8 handles Workload Identity)
+
+    k8s/order-service-sa.yaml                    (later: update workloads.yaml to reference it)
+
+  Commit messages:
+    1. feat: add API key authentication middleware to order-service
+    2. feat: add Kubernetes NetworkPolicy and dedicated ServiceAccounts
+
+================================================================================
+
+4.7 PHASE 7 — K8s Hardening: Resource Limits & HPA
+────────────────────────────────────────────────────────────────────────
+  Goal:    Prevent resource starvation and enable auto-scaling.
+
+  Opinionated decisions:
+    ── Memory requests = 128Mi, limits = 256Mi (tested against real app behavior).
+    ── CPU requests = 100m, limits = 500m (burst allowed for startup).
+    ── HPA targets 70% CPU utilisation, min=2, max=10 replicas.
+    ── HPA uses the custom/metrics endpoint (requires Prometheus adapter for
+        custom metrics — but CPU-based HPA works out of the box on GKE).
+
+  Files changed:
+    k8s/workloads.yaml                              (MODIFY)
+    ├── Add resources.requests/limits to both deployments
+    └── Add serviceAccountName references
+
+    k8s/hpa.yaml                                    (NEW)
+    ├── HorizontalPodAutoscaler for order-service
+    └── HorizontalPodAutoscaler for inventory-service
+
+  Commit message:
+    feat: add resource requests/limits and HorizontalPodAutoscaler
+
+    Set CPU (100m/500m) and memory (128Mi/256Mi) resource bounds on both
+    deployments. Add CPU-based HPA (70% target, 2-10 replicas) so the
+    cluster auto-scales under load. These values were validated against
+    a single-user latency test and should be revisited after load testing.
+
+================================================================================
+
+4.8 PHASE 8 — Infrastructure: GCS Backend & Workload Identity
+────────────────────────────────────────────────────────────────────────
+  Goal:    Cloud-native Terraform state management and pod-level GCP auth.
+
+  Opinionated decisions:
+    ── GCS bucket uses a globally unique name: portfolio-tfstate-<project-id>.
+    ── Object versioning enabled; no public access.
+    ── Workload Identity: Bind order-service KSA → a dedicated GSA with
+        minimal permissions (e.g., access Secret Manager for the API key).
+    ── The existing gke-sa is for node-level; these are pod-level.
+
+  Files changed:
+    terraform/backend.tf                             (NEW)
+    ├── terraform { backend "gcs" { bucket = "..." } }
+    └── Note: must run `terraform init -migrate-state` after creation
+
+    terraform/iam.tf                                 (NEW)
+    ├── google_service_account.order_service_sa
+    ├── google_service_account.inventory_service_sa
+    ├── google_project_iam_member bindings (minimal: secretmanager.accessor)
+    └── Data source: google_iam_workload_identity_pool
+
+    terraform/storage.tf                             (NEW)
+    ├── google_storage_bucket.tfstate
+    ├── google_storage_bucket_iam_member (terraform SA access)
+    └── Versioning + lifecycle rules
+
+  Commit message:
+    infra: migrate terraform state to GCS and add Workload Identity bindings
+
+    - Create GCS bucket for remote Terraform state with object versioning
+    - Create dedicated Google Service Accounts per microservice
+    - Bind KSA → GSA via Workload Identity for pod-level GCP auth
+    - Grant minimal IAM roles (secretmanager.accessor) to each service
+
+================================================================================
+
+4.9 PHASE 9 — Cost Management: Destroy Scripts
+────────────────────────────────────────────────────────────────────────
+  Goal:    One-command full teardown of GCP resources.
+
+  Design:
+    ── Both scripts follow the same order:
+        1.  Delete K8s workloads (releases LoadBalancer → forwarding rules)
+        2.  Delete container images from Artifact Registry
+        3.  Run terraform destroy -auto-approve
+        4.  Delete the GCS Terraform state bucket (optional, prompted)
+        5.  Print verification steps
+    ── Project, zone, repo vars at the top of each script.
+    ── Each step checks for failure — if a resource is already gone, skip.
+
+  Files changed:
+    scripts/destroy.sh                               (NEW)  — bash for Cloud Shell / Linux
+    scripts/destroy.ps1                              (NEW)  — PowerShell for Windows
+
+  Commit message:
+    feat: add destroy scripts for full GCP resource teardown
+
+    Both bash and PowerShell scripts that tear down all GCP resources
+    in dependency-safe order: k8s workloads → container images →
+    terraform destroy → state bucket. Designed for users who clone the
+    repo and want to avoid ongoing cloud costs.
+
+================================================================================
+
+4.10 PHASE 10 — Documentation: README
+────────────────────────────────────────────────────────────────────────
+  Goal:    A complete README that lets anyone clone, deploy, and destroy.
+
+  Sections:
+    ├── Project Overview
+    ├── Architecture (ASCII diagram)
+    ├── Prerequisites (gcloud, terraform, kubectl, Docker)
+    ├── Quick Start
+    │   ├── Local Dev (docker compose up)
+    │   ├── Deploy to GKE (GitHub Actions or manual)
+    │   └── Running Tests
+    ├── Project Structure
+    ├── Cost Management
+    │   ├── Bash: ./scripts/destroy.sh
+    │   └── PowerShell: .\scripts\destroy.ps1
+    └── CI/CD Pipeline
+
+  Commit message:
+    docs: add comprehensive README with architecture, setup, and teardown
+
+================================================================================
+5.  COMMIT STRATEGY REFERENCE
+================================================================================
+
+Each phase results in one or more commits. All commits are local-only until
+the user runs `git push origin main`. The commit log should read as a
+coherent narrative:
+
+    feat: add in-memory persistence with repository pattern          (P1)
+    feat: add docker-compose.yml for local dev                       (P2)
+    feat: add pytest configuration and inventory-service tests       (P3a)
+    feat: add order-service unit and integration tests               (P3b)
+    ci: add pre-commit hooks with ruff linting and formatting        (P4a)
+    ci: add PR checks workflow for lint, test, and build             (P4b)
+    feat: add prometheus /metrics endpoints to both services         (P5)
+    feat: add api key authentication middleware                      (P6a)
+    feat: add Kubernetes NetworkPolicy and dedicated SAs             (P6b)
+    feat: add resource requests/limits and HorizontalPodAutoscalers  (P7)
+    infra: migrate terraform state to GCS and add WLI bindings       (P8)
+    feat: add destroy scripts for full GCP resource teardown         (P9)
+    docs: add comprehensive README with architecture and setup       (P10)
+
+Commit message convention:
+  feat:     New feature or enhancement
+  fix:      Bug fix
+  ci:       CI/CD configuration
+  infra:    Infrastructure / Terraform
+  docs:     Documentation only
+  refactor: Code restructure without behaviour change
+
+================================================================================
+6.  APPENDIX: GCP Free Tier Constraints
+================================================================================
+
+  Always Free (will not cost):
+  ── Firestore (1GB storage, 50K reads/day, 20K writes/day)
+  ── Cloud Functions (2M invocations/month) — not used
+  ── Cloud Build (120 min/day) — not used, we use GH Actions
+  ── Secret Manager (6 active secrets/month)
+  ── Cloud Monitoring (free tier metrics)
+
+  Costs money (already running):
+  ── GKE cluster (zonal, ~$21/mo for 2× spot e2-medium + ~$11/mo control plane)
+  ── Cloud NAT (~$32/mo)
+  ── Artifact Registry (~$0.10/GB/month)
+
+  Costs to avoid:
+  ── GCLB / Ingress (~$20-25/mo) — use K8s LoadBalancer instead
+  ── Cloud SQL (min ~$10/mo) — skip, use in-memory or Firestore later
+  ── IAP ($0.05/user/session) — skip, use API key auth
+  ── Cloud Armor / WAF — skip for portfolio
+
+  Total estimated monthly cost: ~$55-65/mo, mostly GKE + NAT.
+
+================================================================================
+  END OF PLAN
+================================================================================
